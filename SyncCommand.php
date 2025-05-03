@@ -32,7 +32,8 @@
  * 3. Сделать рефакторинг метода, учучшив его читаемость и понятность.
  */
 
-class SyncCommand {
+class SyncCommand
+{
 
     /**
      * Метод отвечает за связываение платежа и счета покупателю. Это необходимо для того,
@@ -53,17 +54,12 @@ class SyncCommand {
         ]);
 
         $invoicesOut = (new ah($invoicesOut))->filter(function ($item) {
-            return (int)$item['sum'] !== (int)$item['payedSum'] * 100;
+            return (int) $item['sum'] !== (int) $item['payedSum'] * 100;
         })->getAll();
 
         $updatePayment = [];
         $updateInvoiceOut = [];
-        $paymentsIn->each(function($payment) use (
-            $invoicesOut,
-            &$updatePayment,
-            &$updateInvoiceOut,
-            &$isAttachedToInvoiceAttr
-        ) {
+        $paymentsIn->each(function ($payment) use ($invoicesOut, &$updatePayment, &$updateInvoiceOut, &$isAttachedToInvoiceAttr) {
             if (empty($payment['organizationAccount']['meta']['href']) || empty($payment['paymentPurpose'])) {
                 return;
             }
@@ -84,8 +80,11 @@ class SyncCommand {
 
                 // найти номер счета в назначении платежа
                 $attachedByPurpose = false;
-                if (strpos($payment['paymentPurpose'], $arr['name']) !== false
-                    || ((int)$arr['name'] !== 0 && strpos($payment['paymentPurpose'], (string)(int)$arr['name']) !== false)) {
+
+                if (
+                    strpos($payment['paymentPurpose'], $arr['name']) !== false
+                    || ((int) $arr['name'] !== 0 && strpos($payment['paymentPurpose'], (string) (int) $arr['name']) !== false)
+                ) {
                     $attachedByPurpose = self::invoiceNumberInPurpose($arr['name'], $payment['paymentPurpose']);
                 }
 
@@ -143,4 +142,14 @@ class SyncCommand {
     /**
      * Остальные методы класса. Для решения задачи они не нужны.
      */
+    private $user;
+
+    public function setUser($user)
+    {
+        $this->user = $user;
+    }
+    public function startAttachToInvoiceOut($paymentsIn, $msApp)
+    {
+        $this->attachToInvoiceOut($paymentsIn, $msApp);
+    }
 }
