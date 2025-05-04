@@ -48,53 +48,31 @@ class SyncCommand
         $attributes = $this->user->get('settings.' . AttributeModel::TABLE_NAME, new ah());
         $isAttachedToInvoiceAttr = $attributes->get('paymentin.isAttachedToInvoice')->getAll();
 
-        $msApi = $msApp->getJsonApi();
-        $invoicesOut = $msApi->getEntityRows('invoiceout', [
-            'expand' => 'organizationAccount, agent'
-        ]);
-
-        $invoicesOut = (new ah($invoicesOut))->filter(function ($item) {
-            return (int) $item['sum'] !== (int) $item['payedSum'] * 100;
-        })->getAll();
+        $invoicesOut = $this->getUnpaidInvoices($msApp);
 
         $updatePayment = [];
         $updateInvoiceOut = [];
-        $paymentsIn->each(function ($payment) use ($invoicesOut, &$updatePayment, &$updateInvoiceOut, &$isAttachedToInvoiceAttr) {
-            if (empty($payment['organizationAccount']['meta']['href']) || empty($payment['paymentPurpose'])) {
+        $usedInvoiceIds = [];
+        $paymentsIn->each(function ($payment) use ($invoicesOut, &$updatePayment, &$updateInvoiceOut, &$isAttachedToInvoiceAttr, &$usedInvoiceIds) {
+            if (!$this->isValidPayment($payment)) {
                 return;
             }
 
             foreach ($invoicesOut as &$invoiceOut) {
-                $arr = new ah($invoiceOut);
-                if (empty($arr['organizationAccount']['meta']['href'])) {
+                // Пропускаем уже использованные счета
+                if ($this->shouldSkipInvoice($invoiceOut, $usedInvoiceIds)) {
                     continue;
                 }
 
-                $notEqualAgent = !TextHelper::isEqual($arr['agent']['meta']['href'], $payment['agent']['meta']['href']);
-                $notEqualAccount = !TextHelper::isEqual($arr['organizationAccount']['meta']['href'], $payment['organizationAccount']['meta']['href']);
-                $notEqualOrganization = !TextHelper::isEqual($arr['organization']['meta']['href'], $payment['organization']['meta']['href']);
-
-                if ($notEqualAgent || $notEqualAccount || $notEqualOrganization) {
+                if (!$this->isValidInvoice($invoiceOut)) {
                     continue;
                 }
 
-                // найти номер счета в назначении платежа
-                $attachedByPurpose = false;
-
-                if (
-                    strpos($payment['paymentPurpose'], $arr['name']) !== false
-                    || ((int) $arr['name'] !== 0 && strpos($payment['paymentPurpose'], (string) (int) $arr['name']) !== false)
-                ) {
-                    $attachedByPurpose = self::invoiceNumberInPurpose($arr['name'], $payment['paymentPurpose']);
+                if (!$this->isSameCounterparty($invoiceOut, $payment)) {
+                    continue;
                 }
 
-                // найти дату выставления счета в назначении платежа
-                if (!$attachedByPurpose && $arr['sum'] == $payment['sum']) {
-                    $prepareDate = date('d.m.Y', strtotime($arr['moment']));
-                    $attachedByPurpose = strpos($payment['paymentPurpose'], $prepareDate) !== false;
-                }
-
-                if (!$attachedByPurpose && $arr['sum'] != $payment['sum']) {
+                if (!$this->canAttachPaymentToInvoice($invoiceOut, $payment)) {
                     continue;
                 }
 
@@ -105,18 +83,12 @@ class SyncCommand
 
                 $invoiceOut['payments'] = [['meta' => $payment['meta']]];
                 $updateInvoiceOut[] = $invoiceOut;
-
+                $usedInvoiceIds[] = $invoiceOut['id'];
                 return;
             }
         });
 
-        if (!empty($updatePayment)) {
-            $msApi->sendEntity('paymentin', $updatePayment);
-        }
-
-        if (!empty($updateInvoiceOut)) {
-            $msApi->sendEntity('invoiceout', $updateInvoiceOut);
-        }
+        $this->sendUpdates($updatePayment, $updateInvoiceOut, $msApp);
     }
 
     /**
@@ -127,15 +99,71 @@ class SyncCommand
      */
     protected static function invoiceNumberInPurpose($invoiceName, $paymentPurpose): bool
     {
-        $prepareStr = preg_replace('/\D/', ' ', $paymentPurpose);
-        $prepareStr = preg_replace('/\s+/', ' ', $prepareStr);
+        if (preg_match('/сч\/ф\s+(\d+)/u', $paymentPurpose, $matches)) {
+            return true;
+        }
+        return false;
+    }
 
-        $ppAr = explode(' ', $prepareStr);
-        foreach ($ppAr as $piece) {
-            if ($piece == $invoiceName) {
+    protected function isValidPayment($payment): bool
+    {
+        return !empty($payment['organizationAccount']['meta']['href']) && !empty($payment['paymentPurpose']);
+    }
+
+    protected function isValidInvoice($invoiceOut): bool
+    {
+        return !empty($invoiceOut['organizationAccount']['meta']['href']);
+    }
+    protected function getUnpaidInvoices(MoyskladApp $msApp)
+    {
+        $msApi = $msApp->getJsonApi();
+        $invoicesOut = $msApi->getEntityRows('invoiceout', ['expand' => 'organizationAccount, agent']);
+
+        return (new ah($invoicesOut))->filter(function ($invoice) {
+            return (int) $invoice['sum'] !== (int) $invoice['payedSum'] * 100;
+        })->getAll();
+    }
+    protected function shouldSkipInvoice($invoiceOut, $usedInvoiceIds): bool
+    {
+        return in_array($invoiceOut['id'], $usedInvoiceIds, true);
+    }
+    protected function isSameCounterparty($invoiceOut, $payment): bool
+    {
+        $invoice = new ah($invoiceOut);
+        return TextHelper::isEqual($invoice['agent']['meta']['href'], $payment['agent']['meta']['href']) &&
+            TextHelper::isEqual($invoice['organizationAccount']['meta']['href'], $payment['organizationAccount']['meta']['href']) &&
+            TextHelper::isEqual($invoice['organization']['meta']['href'], $payment['organization']['meta']['href']);
+    }
+    protected function sendUpdates($updatePayment, $updateInvoiceOut, $msApp)
+    {
+        $msApi = $msApp->getJsonApi();
+        if (!empty($updatePayment)) {
+            $msApi->sendEntity('paymentin', $updatePayment);
+        }
+        if (!empty($updateInvoiceOut)) {
+            $msApi->sendEntity('invoiceout', $updateInvoiceOut);
+        }
+    }
+    protected function canAttachPaymentToInvoice($invoiceOut, $payment): bool
+    {
+        $invoice = new ah($invoiceOut);
+
+        $invoiceName = $invoice['name'];
+        $paymentPurpose = $payment['paymentPurpose'];
+        $invoiceSum = $invoice['sum'];
+        $paymentSum = $payment['sum'];
+
+        if ($this->invoiceNumberInPurpose($invoiceName, $paymentPurpose)) {
+            return true;
+        }
+
+        if ($invoiceSum == $paymentSum) {
+            $invoiceDate = date('d.m.Y', strtotime($invoice['moment']));
+            if (strpos($paymentPurpose, $invoiceDate) !== false) {
                 return true;
             }
         }
+
         return false;
     }
 
