@@ -99,7 +99,9 @@ class SyncCommand
      */
     protected static function invoiceNumberInPurpose($invoiceName, $paymentPurpose): bool
     {
-        if (preg_match('/сч\/ф\s+(\d+)/u', $paymentPurpose, $matches)) {
+        preg_match('/сч\/ф\s+(\d+)/u', $paymentPurpose, $matches);
+        $prepareStr = preg_replace('/\D/', '', $matches[0]);
+        if ($prepareStr == $invoiceName) {
             return true;
         }
         return false;
